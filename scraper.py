@@ -18,9 +18,9 @@ def extraer_datos_laliga_fantasy():
     if resp.status_code != 200:
         raise Exception(f"Error HTTP {resp.status_code} al conectar con Fútbol Fantasy.")
     
-    # Intento 1: Lectura directa de tablas HTML con Pandas
+    # Intento 1: Lectura de tabla HTML usando html5lib y lxml
     try:
-        tablas = pd.read_html(StringIO(resp.text))
+        tablas = pd.read_html(StringIO(resp.text), flavor=['html5lib', 'lxml'])
         for t in tablas:
             if len(t) > 10 and len(t.columns) >= 4:
                 df_temp = t.copy()
@@ -30,7 +30,6 @@ def extraer_datos_laliga_fantasy():
                     df_temp.columns = ['Jugador', 'Equipo', 'Puntos', 'Precio'] + list(df_temp.columns[4:])
                     df_temp['Posicion'] = 'Desconocida'
                 
-                # Limpiar texto a números
                 df_temp['Precio'] = df_temp['Precio'].astype(str).str.replace(r'[^\d]', '', regex=True)
                 df_temp['Precio'] = pd.to_numeric(df_temp['Precio'], errors='coerce').fillna(0).astype(int)
                 df_temp['Puntos'] = pd.to_numeric(df_temp['Puntos'], errors='coerce').fillna(0).astype(int)
@@ -44,7 +43,7 @@ def extraer_datos_laliga_fantasy():
     except Exception as e:
         print(f"Aviso en Intento 1 (read_html): {e}")
 
-    # Intento 2: Parseo manual de filas tr/td con BeautifulSoup
+    # Intento 2: BeautifulSoup de respaldo
     soup = BeautifulSoup(resp.text, 'html.parser')
     filas = soup.find_all("tr")
     
@@ -74,9 +73,9 @@ def extraer_datos_laliga_fantasy():
                         "Precio": precio
                     })
                     
-    # Definición explícita de columnas para evitar KeyError
     df = pd.DataFrame(jugadores, columns=["Jugador", "Equipo", "Posicion", "Puntos", "Precio"])
-    df = df[df['Precio'] > 0]
+    if not df.empty:
+        df = df[df['Precio'] > 0]
     
     if df.empty:
         raise Exception("No se pudieron extraer datos de la tabla (DataFrame vacío).")
@@ -102,7 +101,6 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Aviso al leer CSV previo: {e}")
                 
-        # Calcular variación respecto al día anterior
         if df_existente is not None and not df_existente.empty:
             fechas_previas = df_existente['Fecha'].unique()
             if len(fechas_previas) > 0:
