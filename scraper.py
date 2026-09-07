@@ -71,25 +71,32 @@ def obtener_mercado():
     tablas = pd.read_html(StringIO(r.text), flavor="lxml")
     df = max(tablas, key=lambda t: len(t))
 
+    # 1. Localización dinámica de columnas (esquiva los nombres corruptos de Pandas)
+    col_jugador = [c for c in df.columns if "Jugador" in str(c)][0]
+    col_dif = [c for c in df.columns if "Dif" in str(c)][0]
+    
+    # 2. Usamos tu pista del td[7]. Si hay varias columnas "Valor", cogemos la última, 
+    # o si Pandas destruyó el nombre, cogemos directamente la columna 6 (td[7]).
+    cols_valor = [c for c in df.columns if "Valor" in str(c)]
+    col_precio = cols_valor[-1] if cols_valor else df.columns[6]
+
     filas = []
     for _, row in df.iterrows():
-        celda_jugador = str(row["Jugador"])
-        celda_dif = str(row["DiferenciaDif."])
-        celda_valor = str(row["Valor"])
+        celda_jugador = str(row[col_jugador])
+        celda_dif = str(row[col_dif])
+        celda_valor = str(row[col_precio])
 
-        # "Antonio SiveraSivera  Alavés" -> separar por 2+ espacios:
-        # ["Antonio SiveraSivera", "Alavés"]
+        # Extraer jugador y equipo
         partes = re.split(r"\s{2,}", celda_jugador.strip())
         bloque_nombre = partes[0]
         equipo = partes[1] if len(partes) > 1 else None
-
         nombre = separar_nombre_repetido(bloque_nombre)
 
-        # Precio actual = primer número de la columna "Valor"
+        # Extraer Precio actual limpiando puntos
         precios = re.findall(r"\d{1,3}(?:\.\d{3})*", celda_valor)
         precio_actual = int(precios[0].replace(".", "")) if precios else None
 
-        # Tendencia = signo del primer valor de "DiferenciaDif."
+        # Extraer Tendencia
         difs = re.findall(r"[+-]?\d[\d.]*", celda_dif)
         if difs and difs[0].startswith("+"):
             tendencia = "Sube"
