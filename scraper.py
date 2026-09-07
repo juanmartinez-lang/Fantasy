@@ -36,51 +36,51 @@ def extraer_num(texto):
 
 
 def obtener_puntos():
-    print("Descargando puntos, jornadas y posición...")
+    print("Descargando puntos, jornadas y detectando posiciones (HTML)...")
     r = requests.get(URL_PUNTOS, headers=HEADERS, timeout=20)
     
-    # 1. Pasada con BeautifulSoup para cazar la posición exacta (PT, DF, MC, DL)
+    # 1. Escanear el HTML oculto para sacar la Posición exacta de las clases CSS
     soup = BeautifulSoup(r.text, "lxml")
     posiciones = {}
     for tr in soup.find_all('tr'):
         a = tr.find('a', href=re.compile(r'/jugadores/'))
         if a:
             clave = normalizar(separar_nombre_repetido(a.get_text(strip=True)))
-            # Extraemos todo el texto de la fila buscando la sigla exacta
-            texto_fila = " ".join(t.upper() for t in tr.stripped_strings)
-            
             pos = "Desc"
-            if re.search(r'\b(PT|POR)\b', texto_fila): pos = "Portero"
-            elif re.search(r'\b(DF|DEF)\b', texto_fila): pos = "Defensa"
-            elif re.search(r'\b(MC|MED)\b', texto_fila): pos = "Mediocentro"
-            elif re.search(r'\b(DL|DEL|DC)\b', texto_fila): pos = "Delantero"
+            
+            # Buscamos en todas las etiquetas de la fila (span, i, etc)
+            for tag in tr.find_all(True):
+                clases = tag.get('class', [])
+                clases_str = " ".join(clases).lower() if isinstance(clases, list) else str(clases).lower()
+                
+                if re.search(r'\b(pt|por|portero)\b', clases_str): pos = "Portero"
+                elif re.search(r'\b(df|def|defensa)\b', clases_str): pos = "Defensa"
+                elif re.search(r'\b(mc|med|mediocentro)\b', clases_str): pos = "Mediocentro"
+                elif re.search(r'\b(dl|del|delantero)\b', clases_str): pos = "Delantero"
+                
+                if pos != "Desc":
+                    break
             
             posiciones[clave] = pos
 
-    # 2. Pasada con Pandas para atrapar los puntos y jornadas
+    # 2. Extraer los puntos y jornadas con Pandas
     tablas = pd.read_html(StringIO(r.text), flavor="lxml")
     df = max(tablas, key=len)
     
     col_jugador = df.columns[0]
-    
-    # Buscar columna de puntos totales
     col_puntos = next((c for c in df.columns if ('fantasy' in str(c).lower() or 'pts' in str(c).lower() or 'total' in str(c).lower()) and 'partido' not in str(c).lower()), df.columns[-2])
     
-    # Limpiamos nombre y creamos clave
     df["Jugador"] = df[col_jugador].apply(lambda x: separar_nombre_repetido(x[0]) if isinstance(x, tuple) else separar_nombre_repetido(x))
     df["Puntos"] = pd.to_numeric(df[col_puntos], errors="coerce").fillna(0).astype(int)
     df["clave"] = df["Jugador"].apply(normalizar)
     
-    # Asignamos las posiciones traducidas (Portero, Defensa...)
+    # Mapeamos la posición real desde nuestro escáner HTML
     df["Posicion"] = df["clave"].map(posiciones).fillna("Desc")
 
-    # 3. Extraer Jornadas dinámicamente esquivando las cabeceras dobles (MultiIndex)
+    # 3. Detectar Jornadas
     lista_jornadas = []
     for col in df.columns:
-        # Si la cabecera es doble ej: ('Jornadas', '1'), cogemos solo el '1'
         col_str = str(col[-1] if isinstance(col, tuple) else col).strip()
-        
-        # Detecta si la columna se llama "1", "J1", "Jornada 1", etc.
         match = re.search(r'^(?:J|Jornada\s*)?(\d+)$', col_str, re.IGNORECASE)
         if match:
             num_j = match.group(1)
@@ -160,7 +160,7 @@ if __name__ == "__main__":
         df_hoy = df_puntos.merge(df_mercado, on="clave", how="left")
         df_hoy = df_hoy.merge(df_lesionados, on="clave", how="left")
         
-        # Limpieza de valores vacíos
+        # Limpieza
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
         df_hoy["Equipo"] = df_hoy["Equipo"].fillna("Desconocido")
         
@@ -169,7 +169,7 @@ if __name__ == "__main__":
             df_hoy["Valor"] = df_hoy["Valor"].astype(int)
             df_hoy["Valor_Anterior"] = df_hoy["Valor_Anterior"].fillna(0).astype(int)
 
-        # ORDEN PERFECTO DE LAS COLUMNAS
+        # ORDEN PERFECTO
         columnas_finales = ["Jugador", "Equipo", "Posicion", "Puntos"] + lista_jornadas + ["Valor", "Valor_Anterior", "Estado", "Fecha"]
         
         fecha_hoy = datetime.today().strftime("%Y-%m-%d")
@@ -180,15 +180,13 @@ if __name__ == "__main__":
         
         if os.path.exists(archivo_csv):
             df_existente = pd.read_csv(archivo_csv)
-            # Recrea el archivo si las jornadas nuevas no existen en el antiguo
-            if not all(j in df_existente.columns for j in lista_jornadas):
-                print("🔄 Nuevas jornadas detectadas. Actualizando estructura del CSV...")
+            # Recrear el archivo si la posición no se guardó bien antes
+            if "Desc" in df_existente["Posicion"].values and "Portero" in df_hoy["Posicion"].values:
+                print("🔄 Actualizando CSV antiguo con las Posiciones correctas...")
                 df_final = df_hoy
             else:
                 df_existente = df_existente[df_existente["Fecha"] != fecha_hoy]
                 df_final = pd.concat([df_existente, df_hoy], ignore_index=True)
-                
-                # Rellena con 0 si en días anteriores no existían las jornadas nuevas
                 for j in lista_jornadas:
                     if j in df_final.columns:
                         df_final[j] = df_final[j].fillna(0).astype(int)
@@ -198,8 +196,8 @@ if __name__ == "__main__":
         df_final = df_final[columnas_finales]
         df_final.to_csv(archivo_csv, index=False, encoding="utf-8-sig")
         
-        print(f"✅ ¡ÉXITO! Se guardaron {len(df_hoy)} jugadores con sus posiciones completas y {len(lista_jornadas)} jornadas.")
-        print(f"ℹ️ Jornadas detectadas: {', '.join(lista_jornadas)}")
+        print(f"✅ ¡ÉXITO! Se guardaron {len(df_hoy)} jugadores con sus posiciones reales (Portero, Defensa, etc).")
+        print(df_hoy.head(5))
 
     except Exception as e:
         print(f"❌ Error: {e}")
