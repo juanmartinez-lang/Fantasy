@@ -1,59 +1,67 @@
+import cloudscraper
+from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
 import os
-import requests
+import re
 
-def extraer_datos_fantasy():
-    # Usamos la API abierta de Mister Fantasy / alternativas sin Cloudflare
-    # que comparten la base de datos de precios oficiales de LaLiga
-    url = "https://raw.githubusercontent.com/jmalonsom/biwenger-api/master/data/players.json"
+def extraer_datos_laliga_fantasy():
+    # URL oficial del mercado/puntos de LaLiga Fantasy
+    url = "https://www.futbolfantasy.com/laliga/puntos/laliga-fantasy"
     
-    # NOTA: Aunque la URL pone 'biwenger-api', muchos de estos repositorios unifican las IDs 
-    # y valores. Para tener los datos de LALIGA FANTASY (RELEVO) exactos sin bloqueos, 
-    # la mejor alternativa es descargar un CSV público diario mantenido por la comunidad.
+    print("Iniciando conexión con bypass de Cloudflare...")
+    # Crear un scraper que simula la firma de un navegador real
+    scraper = cloudscraper.create_scraper(
+        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+    )
     
-    # URL de un repositorio comunitario que actualiza el mercado de LaLiga Fantasy Oficial
-    url_csv_comunidad = "https://raw.githubusercontent.com/wito-j/Fantasy-Scraper/main/data/market.csv"
+    resp = scraper.get(url)
+    if resp.status_code != 200:
+        raise Exception(f"Error HTTP {resp.status_code} al conectar con la web.")
+        
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    filas = soup.find_all("tr")
     
-    try:
-        print("Intentando descargar datos desde fuente comunitaria abierta...")
-        # Pandas puede leer directamente un CSV desde una URL de GitHub sin ser bloqueado
-        df = pd.read_csv(url_csv_comunidad)
-        
-        # Adaptar las columnas si el CSV tiene nombres distintos
-        # Suelen venir como 'Name', 'Team', 'Points', 'Price'
-        if 'Name' in df.columns:
-            df = df.rename(columns={'Name': 'Jugador', 'Team': 'Equipo', 'Points': 'Puntos', 'Price': 'Precio'})
+    jugadores = []
+    for fila in filas:
+        cols = fila.find_all(["td", "th"])
+        if len(cols) >= 4:
+            nombre = cols[0].get_text(strip=True)
+            equipo = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+            posicion = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+            puntos_raw = cols[3].get_text(strip=True) if len(cols) > 3 else "0"
+            precio_raw = cols[4].get_text(strip=True) if len(cols) > 4 else "0"
             
-        # Asegurarnos de que tenemos las columnas mínimas
-        if not {'Jugador', 'Precio', 'Puntos'}.issubset(df.columns):
-            raise Exception("El formato del archivo comunitario no es el esperado.")
-            
-        # Si no hay columna de Posición o Equipo, las rellenamos para que Power BI no falle
-        if 'Posicion' not in df.columns:
-            df['Posicion'] = 'Desconocida'
-        if 'Equipo' not in df.columns:
-            df['Equipo'] = 'Desconocido'
-            
-        df = df[['Jugador', 'Equipo', 'Posicion', 'Puntos', 'Precio']]
+            # Filtrar encabezados y valores vacíos
+            if nombre and nombre.lower() not in ["jugador", "nombre", "columna1", "pos", "pts"]:
+                # Extraer únicamente números limpios
+                num_precio = re.sub(r'[^\d]', '', str(precio_raw))
+                num_puntos = re.sub(r'[^\d]', '', str(puntos_raw))
+                
+                precio = int(num_precio) if num_precio else 0
+                puntos = int(num_puntos) if num_puntos else 0
+                
+                jugadores.append({
+                    "Jugador": nombre,
+                    "Equipo": equipo,
+                    "Posicion": posicion,
+                    "Puntos": puntos,
+                    "Precio": precio
+                })
+                
+    df = pd.DataFrame(jugadores)
+    # Conservar únicamente jugadores con precio activo
+    df = df[df['Precio'] > 0]
+    
+    if df.empty:
+        raise Exception("No se pudieron extraer datos de la tabla de LaLiga Fantasy.")
         
-        # Limpieza básica
-        df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
-        df['Puntos'] = pd.to_numeric(df['Puntos'], errors='coerce').fillna(0).astype(int)
-        
-        # Quitar valores a 0
-        df = df[df['Precio'] > 0]
-        
-        return df
-        
-    except Exception as e:
-        print(f"La fuente principal falló: {e}")
-        raise e
+    return df
 
 if __name__ == "__main__":
     try:
-        print("Iniciando extracción de datos...")
-        df_hoy = extraer_datos_fantasy()
+        print("Obteniendo datos reales de LaLiga Fantasy...")
+        df_hoy = extraer_datos_laliga_fantasy()
         
         fecha_hoy = datetime.today().strftime('%Y-%m-%d')
         df_hoy['Fecha'] = fecha_hoy
@@ -67,9 +75,9 @@ if __name__ == "__main__":
                 if {'Jugador', 'Fecha', 'Precio'}.issubset(temp_df.columns):
                     df_existente = temp_df
             except Exception as e:
-                print(f"Aviso leyendo CSV: {e}")
+                print(f"Aviso al leer CSV previo: {e}")
                 
-        # Calcular variaciones
+        # Calcular variación de precio respecto al día anterior
         if df_existente is not None and not df_existente.empty:
             fechas_previas = df_existente['Fecha'].unique()
             if len(fechas_previas) > 0:
@@ -101,8 +109,8 @@ if __name__ == "__main__":
         df_final['Tendencia'] = df_final['Variacion_Precio'].apply(calcular_tendencia)
         
         df_final.to_csv(archivo_csv, index=False, encoding='utf-8-sig')
-        print(f"✅ ¡ÉXITO! Base de datos actualizada con {len(df_hoy)} jugadores.")
+        print(f"✅ ¡ÉXITO! Base de datos actualizada con {len(df_hoy)} jugadores de LaLiga Fantasy.")
         
     except Exception as e:
-        print(f"❌ Error crítico: {e}")
+        print(f"❌ Error durante el proceso: {e}")
         raise e
