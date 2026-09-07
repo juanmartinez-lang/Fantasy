@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
+from io import StringIO
 import os
 import re
 
@@ -15,13 +16,24 @@ URL_MERCADO = "https://www.futbolfantasy.com/analytics/laliga-fantasy/mercado"
 URL_LESIONADOS = "https://www.futbolfantasy.com/laliga/lesionados"
 
 
+def separar_nombre_repetido(texto):
+    """'Antonio SiveraSivera' -> 'Antonio Sivera'
+    Busca el bloque final que está duplicado (el apodo pegado al nombre)."""
+    texto = texto.strip()
+    n = len(texto)
+    for L in range(n // 2, 0, -1):
+        if texto[n - 2 * L:n - L] == texto[n - L:]:
+            return texto[:n - L].strip()
+    return texto
+
+
 def obtener_puntos():
     """Devuelve DataFrame con Jugador y Puntos Fantasy."""
     print("Descargando puntos por jugador...")
     r = requests.get(URL_PUNTOS, headers=HEADERS, timeout=20)
     r.raise_for_status()
 
-    tablas = pd.read_html(r.text, flavor="lxml")
+    tablas = pd.read_html(StringIO(r.text), flavor="lxml")
     # Buscamos la tabla grande de jugadores (muchas filas y columnas)
     df = max(tablas, key=lambda t: len(t))
 
@@ -56,35 +68,42 @@ def obtener_mercado():
     r = requests.get(URL_MERCADO, headers=HEADERS, timeout=20)
     r.raise_for_status()
 
-    tablas = pd.read_html(r.text, flavor="lxml")
+    tablas = pd.read_html(StringIO(r.text), flavor="lxml")
     df = max(tablas, key=lambda t: len(t))
-
-    # --- DIAGNÓSTICO: quitar estas 5 líneas cuando ya funcione ---
-    print(f"[DEBUG mercado] tablas encontradas: {len(tablas)}")
-    print(f"[DEBUG mercado] forma tabla elegida: {df.shape}")
-    print(f"[DEBUG mercado] columnas: {df.columns.tolist()}")
-    print("[DEBUG mercado] primeras 5 filas:")
-    print(df.head(5).to_string())
-    # ---------------------------------------------------------------
 
     filas = []
     for _, row in df.iterrows():
-        celdas = [str(c) for c in row.tolist()]
-        # La primera celda suele traer "NombreApodo Equipo" pegados
-        primera = celdas[0]
+        celda_jugador = str(row["Jugador"])
+        celda_dif = str(row["DiferenciaDif."])
+        celda_valor = str(row["Valor"])
 
-        # Extraer precio actual: el último número grande con puntos de miles
-        precios = re.findall(r"\d{1,3}(?:\.\d{3})+", " ".join(celdas))
+        # "Antonio SiveraSivera  Alavés" -> separar por 2+ espacios:
+        # ["Antonio SiveraSivera", "Alavés"]
+        partes = re.split(r"\s{2,}", celda_jugador.strip())
+        bloque_nombre = partes[0]
+        equipo = partes[1] if len(partes) > 1 else None
+
+        nombre = separar_nombre_repetido(bloque_nombre)
+
+        # Precio actual = primer número de la columna "Valor"
+        precios = re.findall(r"\d{1,3}(?:\.\d{3})*", celda_valor)
         precio_actual = int(precios[0].replace(".", "")) if precios else None
 
-        # Extraer tendencia por el signo del primer valor de diferencia
-        difs = re.findall(r"[+-]\d[\d.]*", " ".join(celdas))
-        if difs:
-            tendencia = "Sube" if difs[0].startswith("+") else "Baja" if difs[0].startswith("-") else "Mantiene"
+        # Tendencia = signo del primer valor de "DiferenciaDif."
+        difs = re.findall(r"[+-]?\d[\d.]*", celda_dif)
+        if difs and difs[0].startswith("+"):
+            tendencia = "Sube"
+        elif difs and difs[0].startswith("-"):
+            tendencia = "Baja"
         else:
             tendencia = "Mantiene"
 
-        filas.append({"Jugador_raw": primera, "Precio": precio_actual, "Tendencia": tendencia})
+        filas.append({
+            "Jugador_raw": nombre,
+            "Equipo": equipo,
+            "Precio": precio_actual,
+            "Tendencia": tendencia,
+        })
 
     out = pd.DataFrame(filas).dropna(subset=["Precio"])
     return out
@@ -135,16 +154,13 @@ if __name__ == "__main__":
         df_mercado["clave"] = df_mercado["Jugador_raw"].apply(normalizar)
         df_lesionados["clave"] = df_lesionados["Jugador_raw"].apply(normalizar)
 
-        # --- DIAGNÓSTICO: quitar cuando ya funcione ---
-        print(f"[DEBUG] claves puntos ejemplo: {df_puntos['clave'].head(5).tolist()}")
-        print(f"[DEBUG] claves mercado ejemplo: {df_mercado['clave'].head(5).tolist()}")
-        # -----------------------------------------------
-
-        df_hoy = df_puntos.merge(df_mercado[["clave", "Precio", "Tendencia"]], on="clave", how="left")
+        df_hoy = df_puntos.merge(
+            df_mercado[["clave", "Equipo", "Precio", "Tendencia"]], on="clave", how="left"
+        )
         print(f"[DEBUG] filas con precio tras cruzar mercado: {df_hoy['Precio'].notna().sum()} / {len(df_hoy)}")
         df_hoy = df_hoy.merge(df_lesionados[["clave", "Estado"]], on="clave", how="left")
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
-        df_hoy = df_hoy.drop(columns=["clave"])
+        df_hoy = df_hoy[["Jugador", "Equipo", "Puntos", "Precio", "Tendencia", "Estado"]]
 
         fecha_hoy = datetime.today().strftime("%Y-%m-%d")
         df_hoy["Fecha"] = fecha_hoy
