@@ -1,82 +1,66 @@
-import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
 import os
-import re
-
-def limpiar_precio(val):
-    """Convierte un texto como '15.000.000 €' en un número entero 15000000."""
-    if pd.isna(val):
-        return 0
-    numeros = re.sub(r'[^\d]', '', str(val))
-    return int(numeros) if numeros else 0
 
 def extraer_datos():
-    url = "https://www.futbolfantasy.com/laliga/puntos/laliga-fantasy"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": "https://www.google.com/"
-    }
+    # Usamos pandas para extraer la tabla de mercado directamente
+    url = "https://www.comuniate.com/mercado/laliga"
     
-    session = requests.Session()
-    resp = session.get(url, headers=headers, timeout=15)
-    
-    if resp.status_code != 200:
-        raise Exception(f"Error HTTP {resp.status_code} al conectar con la web.")
-
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    filas = soup.find_all("tr")
-    
-    jugadores = []
-    for fila in filas:
-        cols = fila.find_all(["td", "th"])
-        if len(cols) >= 4:
-            nombre = cols[0].get_text(strip=True)
-            equipo = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-            posicion = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-            puntos = cols[3].get_text(strip=True) if len(cols) > 3 else "0"
-            precio_raw = cols[4].get_text(strip=True) if len(cols) > 4 else "0"
+    try:
+        # Pandas buscará automáticamente las tablas en el HTML de la web
+        tablas = pd.read_html(url, flavor='lxml')
+        
+        # Seleccionamos la tabla principal
+        if tablas:
+            df = tablas[0]
             
-            if nombre and nombre.lower() not in ["jugador", "nombre", "columna1", "pos", "pts"]:
-                jugadores.append({
-                    "Jugador": nombre,
-                    "Equipo": equipo,
-                    "Posicion": posicion,
-                    "Puntos": limpiar_precio(puntos),
-                    "Precio": limpiar_precio(precio_raw)
-                })
+            # Renombramos las columnas si es necesario para adaptarlas a nuestro modelo
+            columnas_detectadas = list(df.columns)
+            
+            # Comuniate suele tener las columnas: Jugador, Equipo, Precio, Variación, etc.
+            # Vamos a asegurar que haya al menos las básicas
+            if len(columnas_detectadas) >= 3:
+                # Estandarizamos los nombres de la tabla extraída (la primera columna suele ser jugador)
+                df.columns = ['Jugador', 'Equipo', 'Precio', 'Var_Hoy', 'Puntos', 'Media'] + list(df.columns[6:])
                 
-    df = pd.DataFrame(jugadores)
-    if df.empty:
-        raise Exception("No se encontraron datos de jugadores en la página.")
-    return df
+                # Seleccionamos solo las que nos importan
+                df = df[['Jugador', 'Equipo', 'Precio', 'Puntos']]
+                
+                # Limpiamos el texto para asegurar que no haya símbolos y convertir a números
+                df['Precio'] = df['Precio'].astype(str).str.replace(r'[^\d]', '', regex=True)
+                df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
+                
+                df['Puntos'] = pd.to_numeric(df['Puntos'], errors='coerce').fillna(0).astype(int)
+                
+                return df
+            else:
+                raise Exception("La tabla extraída no tiene suficientes columnas.")
+        else:
+            raise Exception("No se encontraron tablas en la web.")
+    except Exception as e:
+        print(f"Intento con read_html fallido: {e}")
+        raise e
 
 if __name__ == "__main__":
     try:
-        print("Obteniendo datos de Fútbol Fantasy...")
+        print("Obteniendo datos de mercado...")
         df_hoy = extraer_datos()
+        
         fecha_hoy = datetime.today().strftime('%Y-%m-%d')
         df_hoy['Fecha'] = fecha_hoy
         
         archivo_csv = 'historico_fantasy.csv'
         df_existente = None
         
-        # Validar si el CSV existente tiene la estructura correcta
         if os.path.exists(archivo_csv):
             try:
                 temp_df = pd.read_csv(archivo_csv)
-                columnas_requeridas = {'Jugador', 'Fecha', 'Precio'}
-                if columnas_requeridas.issubset(temp_df.columns):
+                if {'Jugador', 'Fecha', 'Precio'}.issubset(temp_df.columns):
                     df_existente = temp_df
-                else:
-                    print("⚠️ CSV previo no compatible. Recreando archivo...")
-            except Exception:
-                print("⚠️ No se pudo leer el CSV previo. Recreando archivo...")
-
-        # Procesar variaciones de precio
+            except:
+                pass
+                
+        # Cálculo de variaciones
         if df_existente is not None and not df_existente.empty:
             fechas_previas = df_existente['Fecha'].unique()
             if len(fechas_previas) > 0:
@@ -93,26 +77,25 @@ if __name__ == "__main__":
                 df_hoy['Variacion_Precio'] = df_hoy.apply(calc_variacion, axis=1)
             else:
                 df_hoy['Variacion_Precio'] = 0
-            
+                
+            # No duplicar los del mismo día
             df_existente = df_existente[df_existente['Fecha'] != fecha_hoy]
             df_final = pd.concat([df_existente, df_hoy], ignore_index=True)
         else:
             df_hoy['Variacion_Precio'] = 0
             df_final = df_hoy
-
-        # Determinar tendencia
+            
         def calcular_tendencia(var):
-            if var > 0:
-                return 'Sube'
-            elif var < 0:
-                return 'Baja'
-            else:
-                return 'Mantiene'
-
+            if var > 0: return 'Sube'
+            elif var < 0: return 'Baja'
+            else: return 'Mantiene'
+            
         df_final['Tendencia'] = df_final['Variacion_Precio'].apply(calcular_tendencia)
+        
+        # Guardar archivo
         df_final.to_csv(archivo_csv, index=False, encoding='utf-8-sig')
-        print(f"✅ Proceso completado exitosamente. {len(df_hoy)} jugadores procesados.")
-
+        print(f"✅ Proceso completado: {len(df_hoy)} jugadores.")
+        
     except Exception as e:
-        print(f"❌ Error durante la ejecución: {e}")
+        print(f"❌ Error crítico: {e}")
         raise e
