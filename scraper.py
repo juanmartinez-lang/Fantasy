@@ -9,7 +9,6 @@ def extraer_datos_laliga_fantasy():
     url = "https://www.futbolfantasy.com/laliga/puntos/laliga-fantasy"
     print("Iniciando navegador indetectable (Chrome) para ejecutar JavaScript...")
     
-    # Configurar Chrome para ejecutarse de forma invisible en GitHub Actions
     options = uc.ChromeOptions()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
@@ -20,36 +19,35 @@ def extraer_datos_laliga_fantasy():
     try:
         driver.get(url)
         print("Página web cargada. Esperando 12 segundos a que el JavaScript dibuje la tabla...")
-        time.sleep(12)  # Pausa obligatoria para que aparezcan los datos
+        time.sleep(12)
         
         html = driver.page_source
         print("Código HTML procesado capturado. Extrayendo tabla...")
         
         try:
-            tablas = pd.read_html(StringIO(html))
+            # Forzamos 'lxml' para evitar el error de html5lib
+            tablas = pd.read_html(StringIO(html), flavor='lxml')
         except Exception as e:
-            raise Exception(f"No se detectaron tablas ni siquiera tras renderizar JS: {e}")
+            raise Exception(f"Error al leer HTML con pandas: {e}")
             
         df_objetivo = None
         for t in tablas:
-            # Buscamos la tabla que tenga más de 10 filas (jugadores) y 4 columnas
             if len(t) > 10 and len(t.columns) >= 4:
                 df_objetivo = t.copy()
                 break
                 
         if df_objetivo is None:
-            raise Exception("Se encontraron tablas, pero ninguna coincide con la lista de jugadores.")
+            raise Exception("No se encontró la tabla de jugadores.")
             
         df = df_objetivo
         
-        # Estructurar las columnas
+        # Estandarizar columnas
         if len(df.columns) >= 5:
             df.columns = ['Jugador', 'Equipo', 'Posicion', 'Puntos', 'Precio'] + list(df.columns[5:])
         else:
             df.columns = ['Jugador', 'Equipo', 'Puntos', 'Precio'] + list(df.columns[4:])
             df['Posicion'] = 'Desconocida'
         
-        # Limpiar los textos para extraer solo números enteros
         df['Precio'] = df['Precio'].astype(str).str.replace(r'[^\d]', '', regex=True)
         df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
         df['Puntos'] = pd.to_numeric(df['Puntos'], errors='coerce').fillna(0).astype(int)
@@ -60,12 +58,11 @@ def extraer_datos_laliga_fantasy():
         return df
         
     finally:
-        # Es vital cerrar el navegador al terminar para que el Action no se quede colgado
         driver.quit()
 
 if __name__ == "__main__":
     try:
-        print("Obteniendo datos reales de LaLiga Fantasy (Relevo)...")
+        print("Obteniendo datos de LaLiga Fantasy...")
         df_hoy = extraer_datos_laliga_fantasy()
         
         fecha_hoy = datetime.today().strftime('%Y-%m-%d')
@@ -80,9 +77,8 @@ if __name__ == "__main__":
                 if {'Jugador', 'Fecha', 'Precio'}.issubset(temp_df.columns):
                     df_existente = temp_df
             except Exception as e:
-                print(f"Aviso al leer CSV previo: {e}")
+                print(f"Aviso CSV: {e}")
                 
-        # Calcular variación de precio respecto al último día registrado
         if df_existente is not None and not df_existente.empty:
             fechas_previas = df_existente['Fecha'].unique()
             if len(fechas_previas) > 0:
@@ -114,8 +110,8 @@ if __name__ == "__main__":
         df_final['Tendencia'] = df_final['Variacion_Precio'].apply(calcular_tendencia)
         
         df_final.to_csv(archivo_csv, index=False, encoding='utf-8-sig')
-        print(f"✅ ¡ÉXITO! Base de datos actualizada con {len(df_hoy)} jugadores de LaLiga Fantasy.")
+        print(f"✅ ¡ÉXITO! Se guardaron {len(df_hoy)} jugadores.")
         
     except Exception as e:
-        print(f"❌ Error durante el proceso: {e}")
+        print(f"❌ Error: {e}")
         raise e
