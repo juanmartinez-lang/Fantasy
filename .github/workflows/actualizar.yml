@@ -26,7 +26,8 @@ jobs:
       - name: Commit y Guardar CSV
         run: |
           git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action Bot"
+          git config --local user.name "GitHub Action"
           git add historico_fantasy.csv
-          git commit -m "Actualización diaria Fútbol Fantasy" || echo "Sin cambios que guardar"
+          git commit -m "Actualización diaria Fútbol Fantasy" || echo "No hay cambios para hacer commit"
+          git pull --rebase origin main
           git push
