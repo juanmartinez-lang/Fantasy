@@ -1,90 +1,71 @@
-import cloudscraper
-from bs4 import BeautifulSoup
+import undetected_chromedriver as uc
 import pandas as pd
 from datetime import datetime
 import os
-import re
+import time
 from io import StringIO
 
 def extraer_datos_laliga_fantasy():
     url = "https://www.futbolfantasy.com/laliga/puntos/laliga-fantasy"
-    print("Iniciando conexión con bypass de Cloudflare...")
+    print("Iniciando navegador indetectable (Chrome) para ejecutar JavaScript...")
     
-    scraper = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
-    )
+    # Configurar Chrome para ejecutarse de forma invisible en GitHub Actions
+    options = uc.ChromeOptions()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
     
-    resp = scraper.get(url, timeout=20)
-    if resp.status_code != 200:
-        raise Exception(f"Error HTTP {resp.status_code} al conectar con Fútbol Fantasy.")
+    driver = uc.Chrome(options=options)
     
-    # Intento 1: Lectura de tabla HTML usando html5lib y lxml
     try:
-        tablas = pd.read_html(StringIO(resp.text), flavor=['html5lib', 'lxml'])
-        for t in tablas:
-            if len(t) > 10 and len(t.columns) >= 4:
-                df_temp = t.copy()
-                if len(df_temp.columns) >= 5:
-                    df_temp.columns = ['Jugador', 'Equipo', 'Posicion', 'Puntos', 'Precio'] + list(df_temp.columns[5:])
-                else:
-                    df_temp.columns = ['Jugador', 'Equipo', 'Puntos', 'Precio'] + list(df_temp.columns[4:])
-                    df_temp['Posicion'] = 'Desconocida'
-                
-                df_temp['Precio'] = df_temp['Precio'].astype(str).str.replace(r'[^\d]', '', regex=True)
-                df_temp['Precio'] = pd.to_numeric(df_temp['Precio'], errors='coerce').fillna(0).astype(int)
-                df_temp['Puntos'] = pd.to_numeric(df_temp['Puntos'], errors='coerce').fillna(0).astype(int)
-                
-                df_temp = df_temp[['Jugador', 'Equipo', 'Posicion', 'Puntos', 'Precio']]
-                df_temp = df_temp[df_temp['Precio'] > 0]
-                
-                if len(df_temp) > 10:
-                    print(f"✅ Extraídos {len(df_temp)} jugadores vía read_html.")
-                    return df_temp
-    except Exception as e:
-        print(f"Aviso en Intento 1 (read_html): {e}")
-
-    # Intento 2: BeautifulSoup de respaldo
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    filas = soup.find_all("tr")
-    
-    jugadores = []
-    for fila in filas:
-        cols = fila.find_all(["td", "th"])
-        if len(cols) >= 4:
-            nombre = cols[0].get_text(strip=True)
-            equipo = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-            posicion = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-            puntos_raw = cols[3].get_text(strip=True) if len(cols) > 3 else "0"
-            precio_raw = cols[4].get_text(strip=True) if len(cols) > 4 else "0"
-            
-            if nombre and nombre.lower() not in ["jugador", "nombre", "columna1", "pos", "pts", "puntos"]:
-                num_precio = re.sub(r'[^\d]', '', str(precio_raw))
-                num_puntos = re.sub(r'[^\d]', '', str(puntos_raw))
-                
-                precio = int(num_precio) if num_precio else 0
-                puntos = int(num_puntos) if num_puntos else 0
-                
-                if precio > 0 or puntos > 0:
-                    jugadores.append({
-                        "Jugador": nombre,
-                        "Equipo": equipo,
-                        "Posicion": posicion,
-                        "Puntos": puntos,
-                        "Precio": precio
-                    })
-                    
-    df = pd.DataFrame(jugadores, columns=["Jugador", "Equipo", "Posicion", "Puntos", "Precio"])
-    if not df.empty:
-        df = df[df['Precio'] > 0]
-    
-    if df.empty:
-        raise Exception("No se pudieron extraer datos de la tabla (DataFrame vacío).")
+        driver.get(url)
+        print("Página web cargada. Esperando 12 segundos a que el JavaScript dibuje la tabla...")
+        time.sleep(12)  # Pausa obligatoria para que aparezcan los datos
         
-    return df
+        html = driver.page_source
+        print("Código HTML procesado capturado. Extrayendo tabla...")
+        
+        try:
+            tablas = pd.read_html(StringIO(html))
+        except Exception as e:
+            raise Exception(f"No se detectaron tablas ni siquiera tras renderizar JS: {e}")
+            
+        df_objetivo = None
+        for t in tablas:
+            # Buscamos la tabla que tenga más de 10 filas (jugadores) y 4 columnas
+            if len(t) > 10 and len(t.columns) >= 4:
+                df_objetivo = t.copy()
+                break
+                
+        if df_objetivo is None:
+            raise Exception("Se encontraron tablas, pero ninguna coincide con la lista de jugadores.")
+            
+        df = df_objetivo
+        
+        # Estructurar las columnas
+        if len(df.columns) >= 5:
+            df.columns = ['Jugador', 'Equipo', 'Posicion', 'Puntos', 'Precio'] + list(df.columns[5:])
+        else:
+            df.columns = ['Jugador', 'Equipo', 'Puntos', 'Precio'] + list(df.columns[4:])
+            df['Posicion'] = 'Desconocida'
+        
+        # Limpiar los textos para extraer solo números enteros
+        df['Precio'] = df['Precio'].astype(str).str.replace(r'[^\d]', '', regex=True)
+        df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
+        df['Puntos'] = pd.to_numeric(df['Puntos'], errors='coerce').fillna(0).astype(int)
+        
+        df = df[['Jugador', 'Equipo', 'Posicion', 'Puntos', 'Precio']]
+        df = df[df['Precio'] > 0]
+        
+        return df
+        
+    finally:
+        # Es vital cerrar el navegador al terminar para que el Action no se quede colgado
+        driver.quit()
 
 if __name__ == "__main__":
     try:
-        print("Obteniendo datos reales de LaLiga Fantasy...")
+        print("Obteniendo datos reales de LaLiga Fantasy (Relevo)...")
         df_hoy = extraer_datos_laliga_fantasy()
         
         fecha_hoy = datetime.today().strftime('%Y-%m-%d')
@@ -101,6 +82,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Aviso al leer CSV previo: {e}")
                 
+        # Calcular variación de precio respecto al último día registrado
         if df_existente is not None and not df_existente.empty:
             fechas_previas = df_existente['Fecha'].unique()
             if len(fechas_previas) > 0:
