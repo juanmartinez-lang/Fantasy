@@ -2,102 +2,92 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
-from io import StringIO
 import os
 import re
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
 URL_PUNTOS = "https://www.futbolfantasy.com/laliga/estadisticas-puntos/jugador"
 URL_MERCADO = "https://www.futbolfantasy.com/analytics/laliga-fantasy/mercado"
 URL_LESIONADOS = "https://www.futbolfantasy.com/laliga/lesionados"
 
-
-def separar_nombre_repetido(texto):
-    texto = str(texto).strip()
-    n = len(texto)
-    for L in range(n // 2, 0, -1):
-        if texto[n - 2 * L:n - L] == texto[n - L:]:
-            return texto[:n - L].strip()
-    return texto
-
-
-def extraer_id_de_enlace(enlace):
-    """Extrae 'antonio-sivera' de '/jugadores/antonio-sivera' para usarlo como ID."""
-    if enlace:
-        match = re.search(r'/jugadores/([^/]+)', enlace)
+def extraer_id(href):
+    """Extrae el ID único del jugador desde su URL (ej: 'antonio-sivera')."""
+    if href:
+        match = re.search(r'/jugadores/([^/]+)', href)
         if match:
             return match.group(1).lower()
     return None
 
+def extraer_numero(texto):
+    """Busca el primer bloque numérico en un texto (ej: '42.294.959' -> 42294959)."""
+    nums = re.findall(r"\d{1,3}(?:\.\d{3})*", str(texto))
+    return int(nums[0].replace(".", "")) if nums else None
+
 
 def obtener_puntos():
-    print("Descargando puntos por jugador...")
+    print("Descargando puntos e IDs por jugador...")
     r = requests.get(URL_PUNTOS, headers=HEADERS, timeout=20)
     r.raise_for_status()
 
-    # extract_links="body" saca el texto y el enlace en una tupla: ('Antonio Sivera', '/jugadores/antonio...')
-    tablas = pd.read_html(StringIO(r.text), flavor="lxml", extract_links="body")
-    df = max(tablas, key=len)
-    
-    col_jugador = df.columns[0]
-    
-    # Extraemos el ID desde el enlace y el Nombre desde el texto
-    df["ID"] = df[col_jugador].apply(lambda x: extraer_id_de_enlace(x[1]))
-    df["Jugador"] = df[col_jugador].apply(lambda x: separar_nombre_repetido(x[0]))
+    soup = BeautifulSoup(r.text, "lxml")
+    filas = []
 
-    col_puntos = [c for c in df.columns if "Fantasy" in str(c) and "Partido" not in str(c)]
-    col_puntos = col_puntos[0] if col_puntos else df.columns[-2]
+    for tr in soup.find_all("tr"):
+        enlace = tr.find("a", href=re.compile(r"/jugadores/"))
+        if not enlace:
+            continue
+            
+        jugador_id = extraer_id(enlace.get("href"))
+        nombre = enlace.get_text(strip=True)
+        
+        # Los puntos suelen estar en la última columna de la fila
+        tds = tr.find_all("td")
+        if tds:
+            ptos_texto = tds[-1].get_text(strip=True)
+            puntos = int(ptos_texto) if ptos_texto.isdigit() else 0
+            filas.append({"ID": jugador_id, "Jugador": nombre, "Puntos": puntos})
 
-    # Convertimos los puntos (tupla [0] es el texto) a entero
-    df["Puntos"] = df[col_puntos].apply(lambda x: pd.to_numeric(x[0], errors="coerce")).fillna(0).astype(int)
-    
-    return df[["ID", "Jugador", "Puntos"]].dropna(subset=["ID"])
+    return pd.DataFrame(filas).drop_duplicates(subset=["ID"])
 
 
 def obtener_mercado():
-    print("Descargando mercado (valores)...")
+    print("Descargando mercado (Valor actual y anterior)...")
     r = requests.get(URL_MERCADO, headers=HEADERS, timeout=20)
     r.raise_for_status()
 
-    tablas = pd.read_html(StringIO(r.text), flavor="lxml", extract_links="body")
-    df = max(tablas, key=len)
+    soup = BeautifulSoup(r.text, "lxml")
+    filas = []
 
-    col_jugador = [c for c in df.columns if "Jugador" in str(c)][0]
-    col_dif = [c for c in df.columns if "Dif" in str(c)][0]
-    cols_valor = [c for c in df.columns if "Valor" in str(c)]
-    col_valor = cols_valor[-1] if cols_valor else df.columns[6]
-
-    df["ID"] = df[col_jugador].apply(lambda x: extraer_id_de_enlace(x[1]))
-
-    # El equipo está en el texto de la celda jugador (tupla[0])
-    def aislar_equipo(texto):
-        partes = re.split(r"\s{2,}", str(texto).strip())
-        return partes[1] if len(partes) > 1 else "Desconocido"
+    for tr in soup.find_all("tr"):
+        enlace = tr.find("a", href=re.compile(r"/jugadores/"))
+        if not enlace:
+            continue
+            
+        jugador_id = extraer_id(enlace.get("href"))
+        tds = tr.find_all("td")
         
-    df["Equipo"] = df[col_jugador].apply(lambda x: aislar_equipo(x[0]))
+        if len(tds) >= 8:
+            # En Fútbol Fantasy, la penúltima columna es "Valor" y la última es "Valor Ant."
+            celda_valor_actual = tds[-2].get_text(strip=True)
+            celda_valor_anterior = tds[-1].get_text(strip=True)
+            
+            valor_actual = extraer_numero(celda_valor_actual)
+            valor_anterior = extraer_numero(celda_valor_anterior)
+            
+            filas.append({
+                "ID": jugador_id, 
+                "Valor": valor_actual, 
+                "Valor_Anterior": valor_anterior
+            })
 
-    def limpiar_valor(tupla):
-        precios = re.findall(r"\d{1,3}(?:\.\d{3})*", str(tupla[0]))
-        return int(precios[0].replace(".", "")) if precios else None
-
-    def limpiar_tendencia(tupla):
-        texto = str(tupla[0])
-        if "+" in texto: return "Sube"
-        if "-" in texto: return "Baja"
-        return "Mantiene"
-
-    df["Valor"] = df[col_valor].apply(limpiar_valor)
-    df["Tendencia"] = df[col_dif].apply(limpiar_tendencia)
-
-    return df[["ID", "Equipo", "Valor", "Tendencia"]].dropna(subset=["ID", "Valor"])
+    return pd.DataFrame(filas).drop_duplicates(subset=["ID"])
 
 
 def obtener_lesionados():
-    print("Descargando estado de lesiones...")
+    print("Descargando estado de los jugadores...")
     r = requests.get(URL_LESIONADOS, headers=HEADERS, timeout=20)
     r.raise_for_status()
 
@@ -105,17 +95,17 @@ def obtener_lesionados():
     filas = []
 
     for enlace in soup.select('a[href*="/jugadores/"]'):
-        jugador_id = extraer_id_de_enlace(enlace.get("href"))
+        jugador_id = extraer_id(enlace.get("href"))
         if not jugador_id:
             continue
             
-        contenedor = enlace.find_parent()
         estado = "Lesionado"
-        if contenedor:
-            img_estado = contenedor.find_previous("img", src=re.compile(r"(lesionado|duda|disponible)_box"))
-            if img_estado and img_estado.get("src"):
-                if "duda" in img_estado["src"]: estado = "Duda"
-                elif "disponible" in img_estado["src"]: estado = "Disponible"
+        img = enlace.find_parent().find_previous("img", src=re.compile(r"(lesionado|duda|disponible)_box"))
+        if img and img.get("src"):
+            if "duda" in img["src"]:
+                estado = "Duda"
+            elif "disponible" in img["src"]:
+                estado = "Disponible"
                 
         filas.append({"ID": jugador_id, "Estado": estado})
 
@@ -128,31 +118,42 @@ if __name__ == "__main__":
         df_mercado = obtener_mercado()
         df_lesionados = obtener_lesionados()
 
-        # CRUCE 100% PERFECTO BASADO EN ID (URL DEL JUGADOR)
+        # CRUCE ABSOLUTAMENTE PRECISO USANDO EL ID DE LA URL
         df_hoy = df_puntos.merge(df_mercado, on="ID", how="left")
-        
-        print(f"[DEBUG] filas con valor tras cruzar mercado: {df_hoy['Valor'].notna().sum()} / {len(df_hoy)}")
-        
         df_hoy = df_hoy.merge(df_lesionados, on="ID", how="left")
+        
+        # Rellenamos los que no aparecen en la lista de lesiones como "Disponible"
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
         
-        df_hoy = df_hoy[["ID", "Jugador", "Equipo", "Puntos", "Valor", "Tendencia", "Estado"]]
+        # Filtramos para quedarnos solo con las columnas que has pedido
+        df_hoy = df_hoy[["ID", "Jugador", "Puntos", "Valor", "Valor_Anterior", "Estado"]]
+        
+        # Limpieza de filas que no tengan un Valor registrado
+        df_hoy = df_hoy.dropna(subset=["Valor"])
+        
+        # Convertimos los valores a números enteros (quitando decimales residuales de pandas)
+        df_hoy["Valor"] = df_hoy["Valor"].astype(int)
+        if df_hoy["Valor_Anterior"].notna().any():
+            df_hoy["Valor_Anterior"] = df_hoy["Valor_Anterior"].fillna(0).astype(int)
 
         fecha_hoy = datetime.today().strftime("%Y-%m-%d")
         df_hoy["Fecha"] = fecha_hoy
 
+        # Guardado del CSV
         archivo_csv = "historico_fantasy.csv"
         if os.path.exists(archivo_csv):
             df_existente = pd.read_csv(archivo_csv)
+            # Evitar duplicar datos si se ejecuta varias veces el mismo día
             df_existente = df_existente[df_existente["Fecha"] != fecha_hoy]
             df_final = pd.concat([df_existente, df_hoy], ignore_index=True)
         else:
             df_final = df_hoy
 
         df_final.to_csv(archivo_csv, index=False, encoding="utf-8-sig")
-        print(f"✅ ¡ÉXITO! Se guardaron {len(df_hoy)} jugadores.")
+        
+        print(f"✅ ¡ÉXITO! Base de datos actualizada y cruzada por ID. Se guardaron {len(df_hoy)} jugadores.")
         print(df_hoy.head(10))
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error crítico: {e}")
         raise e
