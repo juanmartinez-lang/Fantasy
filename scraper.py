@@ -68,39 +68,48 @@ def obtener_mercado():
     r = requests.get(URL_MERCADO, headers=HEADERS, timeout=20)
     r.raise_for_status()
 
-    tablas = pd.read_html(StringIO(r.text), flavor="lxml")
-    df = max(tablas, key=lambda t: len(t))
-
-    # 1. Localización dinámica de columnas (esquiva los nombres corruptos de Pandas)
-    col_jugador = [c for c in df.columns if "Jugador" in str(c)][0]
-    col_dif = [c for c in df.columns if "Dif" in str(c)][0]
-    
-    # 2. Usamos tu pista del td[7]. Si hay varias columnas "Valor", cogemos la última, 
-    # o si Pandas destruyó el nombre, cogemos directamente la columna 6 (td[7]).
-    cols_valor = [c for c in df.columns if "Valor" in str(c)]
-    col_precio = cols_valor[-1] if cols_valor else df.columns[6]
-
+    # Usamos BeautifulSoup para evitar que Pandas aplaste el nombre y el equipo
+    soup = BeautifulSoup(r.text, "lxml")
     filas = []
-    for _, row in df.iterrows():
-        celda_jugador = str(row[col_jugador])
-        celda_dif = str(row[col_dif])
-        celda_valor = str(row[col_precio])
 
-        # Extraer jugador y equipo
-        partes = re.split(r"\s{2,}", celda_jugador.strip())
-        bloque_nombre = partes[0]
-        equipo = partes[1] if len(partes) > 1 else None
-        nombre = separar_nombre_repetido(bloque_nombre)
+    for tr in soup.find_all("tr"):
+        cols = tr.find_all("td")
+        if len(cols) < 5:
+            continue
+            
+        # 1. Extraer nombre de forma exacta (buscando el enlace del jugador)
+        enlace = None
+        td_jugador = None
+        for td in cols:
+            enlace = td.find("a", href=re.compile(r"/jugadores/"))
+            if enlace:
+                td_jugador = td
+                break
+                
+        if not enlace:
+            continue
+            
+        # Al extraer directo del enlace, evitamos que el equipo se pegue al nombre
+        nombre_sucio = enlace.get_text(strip=True)
+        nombre = separar_nombre_repetido(nombre_sucio)
 
-        # Extraer Precio actual limpiando puntos
+        # Extraer el equipo aislando el texto sobrante
+        texto_celda = td_jugador.get_text(strip=True)
+        equipo = texto_celda.replace(nombre_sucio, "").strip()
+        if not equipo:
+            equipo = "Desconocido"
+
+        # 2. Extraer Precio (Suele ser la penúltima columna)
+        # Si contiene '42.294.959 42.069.630', cogeremos el primer bloque numérico
+        celda_valor = cols[-2].get_text(strip=True)
         precios = re.findall(r"\d{1,3}(?:\.\d{3})*", celda_valor)
         precio_actual = int(precios[0].replace(".", "")) if precios else None
 
-        # Extraer Tendencia
-        difs = re.findall(r"[+-]?\d[\d.]*", celda_dif)
-        if difs and difs[0].startswith("+"):
+        # 3. Extraer Tendencia (Última columna)
+        celda_dif = cols[-1].get_text(strip=True)
+        if "+" in celda_dif:
             tendencia = "Sube"
-        elif difs and difs[0].startswith("-"):
+        elif "-" in celda_dif:
             tendencia = "Baja"
         else:
             tendencia = "Mantiene"
