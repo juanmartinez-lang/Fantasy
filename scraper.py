@@ -5,6 +5,7 @@ from datetime import datetime
 from io import StringIO
 import os
 import re
+import unicodedata
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -19,7 +20,7 @@ URL_LESIONADOS = "https://www.futbolfantasy.com/laliga/lesionados"
 def separar_nombre_repetido(texto):
     """'Antonio SiveraSivera' -> 'Antonio Sivera'
     Busca el bloque final que está duplicado (el apodo pegado al nombre)."""
-    texto = texto.strip()
+    texto = str(texto).strip()
     n = len(texto)
     for L in range(n // 2, 0, -1):
         if texto[n - 2 * L:n - L] == texto[n - L:]:
@@ -37,22 +38,13 @@ def obtener_puntos():
     # Buscamos la tabla grande de jugadores (muchas filas y columnas)
     df = max(tablas, key=lambda t: len(t))
 
-    # La primera columna suele traer el nombre del jugador (a veces con
-    # texto duplicado tipo "Ali HouaryAli Houary" por el alt de la imagen)
+    # La primera columna suele traer el nombre del jugador
     df = df.rename(columns={df.columns[0]: "Jugador_raw"})
 
-    # Limpiar nombre: si el texto está duplicado, quedarnos con la mitad
-    def limpiar_nombre(x):
-        x = str(x).strip()
-        mitad = len(x) // 2
-        if len(x) % 2 == 0 and x[:mitad] == x[mitad:]:
-            return x[:mitad]
-        return x
+    # Usamos separar_nombre_repetido para que la limpieza sea exactamente igual a la del mercado
+    df["Jugador"] = df["Jugador_raw"].apply(separar_nombre_repetido)
 
-    df["Jugador"] = df["Jugador_raw"].apply(limpiar_nombre)
-
-    # La última columna del bloque suele ser "Ptos. Fantasy"; ajusta el
-    # nombre exacto si pandas lo trae distinto
+    # La última columna del bloque suele ser "Ptos. Fantasy"
     col_puntos = [c for c in df.columns if "Fantasy" in str(c) and "Partido" not in str(c)]
     col_puntos = col_puntos[0] if col_puntos else df.columns[-2]
 
@@ -100,7 +92,6 @@ def obtener_mercado():
             equipo = "Desconocido"
 
         # 2. Extraer Precio (Suele ser la penúltima columna)
-        # Si contiene '42.294.959 42.069.630', cogeremos el primer bloque numérico
         celda_valor = cols[-2].get_text(strip=True)
         precios = re.findall(r"\d{1,3}(?:\.\d{3})*", celda_valor)
         precio_actual = int(precios[0].replace(".", "")) if precios else None
@@ -134,12 +125,10 @@ def obtener_lesionados():
     soup = BeautifulSoup(r.text, "lxml")
     filas = []
 
-    # Cada jugador lesionado tiene un enlace a /jugadores/<slug>
     for enlace in soup.select('a[href*="/jugadores/"]'):
         nombre = enlace.get_text(strip=True)
         if not nombre:
             continue
-        # Buscamos la imagen de estado más cercana (lesionado/duda/disponible)
         contenedor = enlace.find_parent()
         estado = "Lesionado"
         img_estado = None
@@ -156,8 +145,11 @@ def obtener_lesionados():
 
 
 def normalizar(nombre):
-    """Normaliza nombres para poder cruzar entre las 3 fuentes."""
-    return str(nombre).strip().lower()
+    """Normaliza nombres quitando mayúsculas, espacios extra y tildes."""
+    texto = str(nombre).strip().lower()
+    # Quita las tildes (á -> a, é -> e) para evitar fallos de cruce
+    texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode("utf-8")
+    return texto
 
 
 if __name__ == "__main__":
@@ -166,24 +158,32 @@ if __name__ == "__main__":
         df_mercado = obtener_mercado()
         df_lesionados = obtener_lesionados()
 
+        # Normalizamos las claves para el cruce exacto
         df_puntos["clave"] = df_puntos["Jugador"].apply(normalizar)
         df_mercado["clave"] = df_mercado["Jugador_raw"].apply(normalizar)
         df_lesionados["clave"] = df_lesionados["Jugador_raw"].apply(normalizar)
 
+        # Cruzar Puntos con Mercado
         df_hoy = df_puntos.merge(
             df_mercado[["clave", "Equipo", "Precio", "Tendencia"]], on="clave", how="left"
         )
         print(f"[DEBUG] filas con precio tras cruzar mercado: {df_hoy['Precio'].notna().sum()} / {len(df_hoy)}")
+        
+        # Cruzar con Lesionados
         df_hoy = df_hoy.merge(df_lesionados[["clave", "Estado"]], on="clave", how="left")
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
+        
+        # Limpiar dataframe final y ordenar columnas
         df_hoy = df_hoy[["Jugador", "Equipo", "Puntos", "Precio", "Tendencia", "Estado"]]
 
         fecha_hoy = datetime.today().strftime("%Y-%m-%d")
         df_hoy["Fecha"] = fecha_hoy
 
+        # Guardar en CSV acumulativo
         archivo_csv = "historico_fantasy.csv"
         if os.path.exists(archivo_csv):
             df_existente = pd.read_csv(archivo_csv)
+            # Eliminar datos de hoy si ya existían para evitar duplicados en la misma ejecución
             df_existente = df_existente[df_existente["Fecha"] != fecha_hoy]
             df_final = pd.concat([df_existente, df_hoy], ignore_index=True)
         else:
