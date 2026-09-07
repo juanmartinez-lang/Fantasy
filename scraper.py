@@ -1,49 +1,55 @@
 import pandas as pd
 from datetime import datetime
 import os
+import requests
+from io import StringIO
 
 def extraer_datos():
-    # Usamos pandas para extraer la tabla de mercado directamente
     url = "https://www.comuniate.com/mercado/laliga"
     
+    # Cabecera para simular un navegador real y evitar el bloqueo 403
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
     try:
-        # Pandas buscará automáticamente las tablas en el HTML de la web
-        tablas = pd.read_html(url, flavor='lxml')
+        # 1. Descargamos el HTML con requests usando la cabecera
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            raise Exception(f"Error HTTP {response.status_code} al conectar con Comuniate")
+            
+        # 2. Leemos la tabla del HTML usando StringIO
+        tablas = pd.read_html(StringIO(response.text), flavor='lxml')
         
-        # Seleccionamos la tabla principal
         if tablas:
             df = tablas[0]
             
-            # Renombramos las columnas si es necesario para adaptarlas a nuestro modelo
-            columnas_detectadas = list(df.columns)
-            
-            # Comuniate suele tener las columnas: Jugador, Equipo, Precio, Variación, etc.
-            # Vamos a asegurar que haya al menos las básicas
-            if len(columnas_detectadas) >= 3:
-                # Estandarizamos los nombres de la tabla extraída (la primera columna suele ser jugador)
-                df.columns = ['Jugador', 'Equipo', 'Precio', 'Var_Hoy', 'Puntos', 'Media'] + list(df.columns[6:])
+            # Renombramos las columnas principales
+            if len(df.columns) >= 4:
+                df.columns = ['Jugador', 'Equipo', 'Precio', 'Puntos'] + list(df.columns[4:])
+                df = df[['Jugador', 'Equipo', 'Precio', 'Puntos']].copy()
                 
-                # Seleccionamos solo las que nos importan
-                df = df[['Jugador', 'Equipo', 'Precio', 'Puntos']]
-                
-                # Limpiamos el texto para asegurar que no haya símbolos y convertir a números
+                # Limpiamos los números
                 df['Precio'] = df['Precio'].astype(str).str.replace(r'[^\d]', '', regex=True)
                 df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
                 
                 df['Puntos'] = pd.to_numeric(df['Puntos'], errors='coerce').fillna(0).astype(int)
                 
+                # Descartamos filas vacías
+                df = df[df['Precio'] > 0]
+                
                 return df
             else:
-                raise Exception("La tabla extraída no tiene suficientes columnas.")
+                raise Exception("La tabla no tiene la estructura esperada.")
         else:
             raise Exception("No se encontraron tablas en la web.")
     except Exception as e:
-        print(f"Intento con read_html fallido: {e}")
+        print(f"Error en la extracción: {e}")
         raise e
 
 if __name__ == "__main__":
     try:
-        print("Obteniendo datos de mercado...")
+        print("Obteniendo datos de mercado de Comuniate...")
         df_hoy = extraer_datos()
         
         fecha_hoy = datetime.today().strftime('%Y-%m-%d')
@@ -78,7 +84,6 @@ if __name__ == "__main__":
             else:
                 df_hoy['Variacion_Precio'] = 0
                 
-            # No duplicar los del mismo día
             df_existente = df_existente[df_existente['Fecha'] != fecha_hoy]
             df_final = pd.concat([df_existente, df_hoy], ignore_index=True)
         else:
@@ -92,9 +97,8 @@ if __name__ == "__main__":
             
         df_final['Tendencia'] = df_final['Variacion_Precio'].apply(calcular_tendencia)
         
-        # Guardar archivo
         df_final.to_csv(archivo_csv, index=False, encoding='utf-8-sig')
-        print(f"✅ Proceso completado: {len(df_hoy)} jugadores.")
+        print(f"✅ Proceso completado: {len(df_hoy)} jugadores procesados.")
         
     except Exception as e:
         print(f"❌ Error crítico: {e}")
