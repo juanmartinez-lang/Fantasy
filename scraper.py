@@ -36,7 +36,7 @@ def extraer_num(texto):
 
 
 def obtener_puntos():
-    print("Descargando puntos...")
+    print("Descargando puntos y jornadas...")
     r = requests.get(URL_PUNTOS, headers=HEADERS, timeout=20)
     tablas = pd.read_html(StringIO(r.text), flavor="lxml")
     df = max(tablas, key=len)
@@ -47,10 +47,24 @@ def obtener_puntos():
 
     df["Jugador"] = df[col_jugador].apply(separar_nombre_repetido)
     df["Puntos"] = pd.to_numeric(df[col_puntos], errors="coerce").fillna(0).astype(int)
-    
-    # Creamos la clave normalizada para cruzar
     df["clave"] = df["Jugador"].apply(normalizar)
-    return df[["Jugador", "Puntos", "clave"]]
+
+    # Detectar dinámicamente las columnas de cada jornada (ej. "1", "2", "3")
+    lista_jornadas = []
+    for col in df.columns:
+        texto_col = str(col).strip()
+        # Busca columnas que sean números exactos (o empiecen por J, por si cambian el formato)
+        match = re.match(r'^(?:J\s*)?(\d+)$', texto_col, re.IGNORECASE)
+        if match:
+            num_jornada = match.group(1)
+            nombre_limpio = f"J{num_jornada}"
+            # Convierte los guiones o vacíos en 0 puntos
+            df[nombre_limpio] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+            lista_jornadas.append(nombre_limpio)
+            
+    # Solo devolvemos lo esencial + las jornadas encontradas
+    columnas_devolver = ["Jugador", "Puntos", "clave"] + lista_jornadas
+    return df[columnas_devolver], lista_jornadas
 
 
 def obtener_mercado():
@@ -65,7 +79,6 @@ def obtener_mercado():
     col_valor_anterior = cols_valor[-1] if len(cols_valor) >= 2 else df.columns[7]
 
     def limpiar_nombre_mercado(texto):
-        # Separa "Antonio SiveraSivera  Alavés" por los espacios dobles y limpia el nombre
         partes = re.split(r'\s{2,}', str(texto).strip())
         return separar_nombre_repetido(partes[0])
 
@@ -104,22 +117,22 @@ def obtener_lesionados():
 
 if __name__ == "__main__":
     try:
-        df_puntos = obtener_puntos()
+        df_puntos, lista_jornadas = obtener_puntos()
         df_mercado = obtener_mercado()
         df_lesionados = obtener_lesionados()
 
-        # Cruce maestro de tablas
+        # Cruce maestro
         df_hoy = df_puntos.merge(df_mercado, on="clave", how="left")
         df_hoy = df_hoy.merge(df_lesionados, on="clave", how="left")
         
-        # Valores por defecto y filtrado
+        # Limpieza final
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
         df_hoy = df_hoy.dropna(subset=["Valor"])
         df_hoy["Valor"] = df_hoy["Valor"].astype(int)
         df_hoy["Valor_Anterior"] = df_hoy["Valor_Anterior"].fillna(0).astype(int)
 
-        # Seleccionamos exactamente las columnas que quieres (sin clave, ni tendencia, ni precio)
-        columnas_finales = ["Jugador", "Puntos", "Valor", "Valor_Anterior", "Estado", "Fecha"]
+        # Ordenamos las columnas: Básicos + Jornadas + Precios
+        columnas_finales = ["Jugador", "Puntos"] + lista_jornadas + ["Valor", "Valor_Anterior", "Estado", "Fecha"]
         
         fecha_hoy = datetime.today().strftime("%Y-%m-%d")
         df_hoy["Fecha"] = fecha_hoy
@@ -129,19 +142,29 @@ if __name__ == "__main__":
         
         if os.path.exists(archivo_csv):
             df_existente = pd.read_csv(archivo_csv)
-            # Si el CSV viejo tiene columnas extrañas, lo sobreescribimos desde cero
-            if list(df_existente.columns) != columnas_finales:
-                print("🔄 Formato de CSV antiguo detectado. Sobreescribiendo con el formato limpio...")
+            # Comprobación de seguridad: Si no están las columnas vitales, sobreescribe todo
+            if not {"Jugador", "Valor", "Fecha"}.issubset(df_existente.columns):
+                print("🔄 Formato de CSV roto detectado. Sobreescribiendo desde cero...")
                 df_final = df_hoy
             else:
                 df_existente = df_existente[df_existente["Fecha"] != fecha_hoy]
+                # Juntamos lo antiguo con lo nuevo. Pandas se encarga solo de emparejar las J1, J2, etc.
                 df_final = pd.concat([df_existente, df_hoy], ignore_index=True)
+                
+                # Para evitar que las jornadas nuevas queden vacías en el registro de días anteriores
+                for j in lista_jornadas:
+                    if j in df_final.columns:
+                        df_final[j] = df_final[j].fillna(0).astype(int)
         else:
             df_final = df_hoy
 
+        # Reordenamos el CSV final para que siempre mantenga la estructura limpia
+        columnas_ordenadas = [c for c in columnas_finales if c in df_final.columns]
+        df_final = df_final[columnas_ordenadas]
+
         df_final.to_csv(archivo_csv, index=False, encoding="utf-8-sig")
-        print(f"✅ ¡ÉXITO! Se guardaron {len(df_hoy)} jugadores correctamente.")
-        print(df_hoy.head(5))
+        print(f"✅ ¡ÉXITO! Se guardaron {len(df_hoy)} jugadores con sus {len(lista_jornadas)} jornadas jugadas.")
+        print(df_hoy.head(3))
 
     except Exception as e:
         print(f"❌ Error: {e}")
