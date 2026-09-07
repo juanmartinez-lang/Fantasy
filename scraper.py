@@ -59,6 +59,14 @@ def obtener_mercado():
     tablas = pd.read_html(r.text, flavor="lxml")
     df = max(tablas, key=lambda t: len(t))
 
+    # --- DIAGNÓSTICO: quitar estas 5 líneas cuando ya funcione ---
+    print(f"[DEBUG mercado] tablas encontradas: {len(tablas)}")
+    print(f"[DEBUG mercado] forma tabla elegida: {df.shape}")
+    print(f"[DEBUG mercado] columnas: {df.columns.tolist()}")
+    print("[DEBUG mercado] primeras 5 filas:")
+    print(df.head(5).to_string())
+    # ---------------------------------------------------------------
+
     filas = []
     for _, row in df.iterrows():
         celdas = [str(c) for c in row.tolist()]
@@ -127,7 +135,13 @@ if __name__ == "__main__":
         df_mercado["clave"] = df_mercado["Jugador_raw"].apply(normalizar)
         df_lesionados["clave"] = df_lesionados["Jugador_raw"].apply(normalizar)
 
+        # --- DIAGNÓSTICO: quitar cuando ya funcione ---
+        print(f"[DEBUG] claves puntos ejemplo: {df_puntos['clave'].head(5).tolist()}")
+        print(f"[DEBUG] claves mercado ejemplo: {df_mercado['clave'].head(5).tolist()}")
+        # -----------------------------------------------
+
         df_hoy = df_puntos.merge(df_mercado[["clave", "Precio", "Tendencia"]], on="clave", how="left")
+        print(f"[DEBUG] filas con precio tras cruzar mercado: {df_hoy['Precio'].notna().sum()} / {len(df_hoy)}")
         df_hoy = df_hoy.merge(df_lesionados[["clave", "Estado"]], on="clave", how="left")
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
         df_hoy = df_hoy.drop(columns=["clave"])
