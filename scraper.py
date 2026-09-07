@@ -16,7 +16,7 @@ URL_MERCADO = "https://www.futbolfantasy.com/analytics/laliga-fantasy/mercado"
 URL_LESIONADOS = "https://www.futbolfantasy.com/laliga/lesionados"
 
 def separar_nombre_repetido(texto):
-    """'Antonio SiveraSivera' -> 'Antonio Sivera'"""
+    """Limpia 'Antonio SiveraSivera' -> 'Antonio Sivera'"""
     texto = str(texto).strip()
     n = len(texto)
     for L in range(n // 2, 0, -1):
@@ -25,40 +25,39 @@ def separar_nombre_repetido(texto):
     return texto
 
 def normalizar(nombre):
+    """Homogeneiza textos para el cruce maestro"""
     texto = str(nombre).strip().lower()
     return unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode("utf-8")
 
 def extraer_num(texto):
+    """Extrae números enteros obviando puntos y signos"""
     nums = re.findall(r"\d{1,3}(?:\.\d{3})*", str(texto))
     return int(nums[0].replace(".", "")) if nums else None
 
 
 def obtener_puntos():
-    print("Descargando puntos y jornadas (Pandas)...")
+    print("Descargando puntos, jornadas y posición (Pandas)...")
     r = requests.get(URL_PUNTOS, headers=HEADERS, timeout=20)
     tablas = pd.read_html(StringIO(r.text), flavor="lxml")
     df = max(tablas, key=len)
     
     col_jugador = df.columns[0]
     
-    # Buscar dinámicamente la columna de Puntos Totales
-    col_puntos = None
-    for c in df.columns:
-        c_str = str(c).lower()
-        if ('fantasy' in c_str or 'total' in c_str or 'pts' in c_str) and 'partido' not in c_str:
-            col_puntos = c
-            break
-    if not col_puntos: col_puntos = df.columns[-2]
-
+    # 1. Buscar columna de puntos totales
+    col_puntos = next((c for c in df.columns if ('fantasy' in str(c).lower() or 'pts' in str(c).lower()) and 'partido' not in str(c).lower()), df.columns[-2])
+    
+    # 2. Buscar columna de Posición
+    col_pos = next((c for c in df.columns if str(c).lower().strip() in ['pos', 'pos.', 'posición', 'posicion']), None)
+    
     df["Jugador"] = df[col_jugador].apply(separar_nombre_repetido)
     df["Puntos"] = pd.to_numeric(df[col_puntos], errors="coerce").fillna(0).astype(int)
+    df["Posicion"] = df[col_pos] if col_pos else "Desc"
     df["clave"] = df["Jugador"].apply(normalizar)
 
-    # Detectar dinámicamente las jornadas (J1, J2, J3...) esquivando sub-cabeceras
+    # 3. Extraer Jornadas dinámicamente
     lista_jornadas = []
     for col in df.columns:
-        col_name = col[-1] if isinstance(col, tuple) else col
-        match = re.match(r'^(?:J\s*)?(\d+)$', str(col_name).strip(), re.IGNORECASE)
+        match = re.match(r'^(?:J\s*)?(\d+)$', str(col).strip(), re.IGNORECASE)
         if match:
             num_j = match.group(1)
             nombre_j = f"J{num_j}"
@@ -66,50 +65,42 @@ def obtener_puntos():
             if nombre_j not in lista_jornadas:
                 lista_jornadas.append(nombre_j)
                 
-    cols_finales = ["clave", "Jugador", "Puntos"] + lista_jornadas
-    return df[cols_finales], lista_jornadas
+    cols_devolver = ["clave", "Jugador", "Posicion", "Puntos"] + lista_jornadas
+    return df[cols_devolver], lista_jornadas
 
 
 def obtener_mercado():
-    print("Descargando mercado, posición y equipo (BeautifulSoup)...")
+    print("Descargando mercado y equipo (Pandas)...")
     r = requests.get(URL_MERCADO, headers=HEADERS, timeout=20)
-    soup = BeautifulSoup(r.text, 'lxml')
-    filas = []
-    
-    for tr in soup.find_all('tr'):
-        tds = tr.find_all('td')
-        if len(tds) < 5: continue
-        
-        enlace = tr.find('a', href=re.compile(r'/jugadores/'))
-        if not enlace: continue
-        
-        nombre_limpio = separar_nombre_repetido(enlace.get_text(strip=True))
-        clave = normalizar(nombre_limpio)
-        
-        # Extraer Posición y Equipo separando cada etiqueta HTML (sin mezclar textos)
-        textos_celda = [t.strip() for t in tds[0].stripped_strings if t.strip()]
-        posicion = "Desc"
-        equipo = "Desconocido"
-        
-        for texto in textos_celda:
-            t_upper = texto.upper()
-            if t_upper in ['PT', 'DF', 'MC', 'DL', 'POR', 'MED', 'DEL']:
-                posicion = t_upper
-            elif t_upper not in nombre_limpio.upper() and len(texto) > 2:
-                equipo = texto
+    tablas = pd.read_html(StringIO(r.text), flavor="lxml")
+    df = max(tablas, key=len)
 
-        valor_actual = extraer_num(tds[-2].get_text(strip=True))
-        valor_anterior = extraer_num(tds[-1].get_text(strip=True))
+    col_jugador = [c for c in df.columns if "Jugador" in str(c)][0]
+    cols_valor = [c for c in df.columns if "Valor" in str(c)]
+    col_valor_actual = cols_valor[-2] if len(cols_valor) >= 2 else df.columns[6]
+    col_valor_anterior = cols_valor[-1] if len(cols_valor) >= 2 else df.columns[7]
+
+    def extraer_equipo(texto):
+        # El equipo está separado por 2 o más espacios (ej: 'Antonio Sivera  Alavés')
+        partes = re.split(r'\s{2,}', str(texto).strip())
+        return partes[1] if len(partes) > 1 else "Desconocido"
+
+    def extraer_nombre(texto):
+        partes = re.split(r'\s{2,}', str(texto).strip())
+        return separar_nombre_repetido(partes[0])
+
+    df["Jugador_limpio"] = df[col_jugador].apply(extraer_nombre)
+    df["Equipo"] = df[col_jugador].apply(extraer_equipo)
+    df["Valor"] = df[col_valor_actual].apply(extraer_num)
+    df["Valor_Anterior"] = df[col_valor_anterior].apply(extraer_num)
+    
+    df["clave"] = df["Jugador_limpio"].apply(normalizar)
+    
+    # Filtrar solo si la columna Valor existe para evitar KeyErrors
+    if "Valor" in df.columns:
+        df = df.dropna(subset=["Valor"])
         
-        filas.append({
-            "clave": clave,
-            "Equipo": equipo,
-            "Posicion": posicion,
-            "Valor": valor_actual,
-            "Valor_Anterior": valor_anterior
-        })
-        
-    return pd.DataFrame(filas).dropna(subset=["Valor"])
+    return df[["clave", "Equipo", "Valor", "Valor_Anterior"]]
 
 
 def obtener_lesionados():
@@ -143,18 +134,20 @@ if __name__ == "__main__":
         df_mercado = obtener_mercado()
         df_lesionados = obtener_lesionados()
 
-        # Cruce maestro exacto
+        # Cruce maestro de tablas
         df_hoy = df_puntos.merge(df_mercado, on="clave", how="left")
         df_hoy = df_hoy.merge(df_lesionados, on="clave", how="left")
         
-        # Limpieza de valores vacíos tras el cruce
+        # Limpieza de valores vacíos post-cruce
         df_hoy["Estado"] = df_hoy["Estado"].fillna("Disponible")
         df_hoy["Equipo"] = df_hoy["Equipo"].fillna("Desconocido")
-        df_hoy["Posicion"] = df_hoy["Posicion"].fillna("Desc")
-        df_hoy = df_hoy.dropna(subset=["Valor"])
-        df_hoy["Valor"] = df_hoy["Valor"].astype(int)
-        df_hoy["Valor_Anterior"] = df_hoy["Valor_Anterior"].fillna(0).astype(int)
+        
+        if "Valor" in df_hoy.columns:
+            df_hoy = df_hoy.dropna(subset=["Valor"])
+            df_hoy["Valor"] = df_hoy["Valor"].astype(int)
+            df_hoy["Valor_Anterior"] = df_hoy["Valor_Anterior"].fillna(0).astype(int)
 
+        # Ordenar columnas
         columnas_finales = ["Jugador", "Equipo", "Posicion", "Puntos"] + lista_jornadas + ["Valor", "Valor_Anterior", "Estado", "Fecha"]
         
         fecha_hoy = datetime.today().strftime("%Y-%m-%d")
@@ -165,8 +158,8 @@ if __name__ == "__main__":
         
         if os.path.exists(archivo_csv):
             df_existente = pd.read_csv(archivo_csv)
-            # Recrea el archivo si le faltan las columnas nuevas de Equipo o Posición
-            if not {"Equipo", "Posicion"}.issubset(df_existente.columns):
+            # Recrea el archivo si tiene la estructura antigua
+            if not {"Equipo", "Posicion"}.issubset(df_existente.columns) or not all(j in df_existente.columns for j in lista_jornadas):
                 print("🔄 Formato de CSV antiguo detectado. Regenerando desde cero...")
                 df_final = df_hoy
             else:
